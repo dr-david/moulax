@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mestim-mcmc"
+version = "0.1"
+description = "M-estimators for robust quasilikelihood using ULA, P-ULA, and Langevin methods"
+authors = [{name = "David Dreifuss"}]
+dependencies = [
+    "jax",
+    "jaxlib",
+    "numpy",
+    "tqdm",
+    "matplotlib"
+]
+
+[tool.setuptools]
+packages = ["mestim_mcmc"]
