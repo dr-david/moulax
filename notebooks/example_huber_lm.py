@@ -12,13 +12,12 @@
 #     name: mestim-jax
 # ---
 
-from mestim_mcmc.sampling import preconditioned_ULA
 import jax.numpy as jnp
 import jax
-import matplotlib.pyplot as plt
-from mestim_mcmc.scores import f, quasibinomial_log_likelihood
-from mestim_mcmc.sampling import step, preconditioned_ULA, make_fisher_matrix
 import jax.random as random
+import matplotlib.pyplot as plt
+from moulax.sampling import step, preconditioned_ULA, make_fisher_matrix
+import arviz as az
 
 # # Simulate data
 #
@@ -131,29 +130,42 @@ def make_score_fun(x, y, influence=ols_influence):
 
 # +
 ols_grad = make_score_fun(xx, y_obs, ols_influence)
-init_theta = jnp.array([0.0, 0.0])  # Initial values for a, b
+init_theta = jnp.array([0.0, 0.0])  
 
 nonrobust_samples = preconditioned_ULA(
-    step, num_samples=10_000, step_size=0.1, fisher_updates=10, init_theta=init_theta, grad_fn=ols_grad
+    step, num_samples=10_000, step_size=0.1, fisher_updates=1, init_theta=init_theta, grad_fn=ols_grad
 )
 
 
 # +
 pseudo_huber_grad = make_score_fun(xx, y_obs, pseudo_huber_influence)
-init_theta = jnp.array([0.0, 0.0])  # Initial values for a, b
+init_theta = jnp.array([0.0, 0.0]) 
 
 pseudo_huber_samples = preconditioned_ULA(
-    step, num_samples=10_000, step_size=0.1, fisher_updates=10, init_theta=init_theta, grad_fn=pseudo_huber_grad
+    step, num_samples=10_000, step_size=0.1, fisher_updates=1, init_theta=init_theta, grad_fn=pseudo_huber_grad
 )
 
 # -
 
+az.summary(nonrobust_samples)
+
+
+az.summary(nonrobust_samples.sel(draw=slice(1000, None)))
+
+
+az.summary(pseudo_huber_samples)
+
+az.summary(pseudo_huber_samples.sel(draw=slice(1000, None)))
+
+
 # # Plot 
 
 # +
-import matplotlib.pyplot as plt
-
 fig, axes = plt.subplots(2, 1, figsize=(8, 6))
+
+# Extract samples from ArviZ InferenceData
+nonrobust_samples = nonrobust_samples.posterior["theta"].mean(dim="chain").values  # Shape (num_draws, num_params)
+pseudo_huber_samples = pseudo_huber_samples.posterior["theta"].mean(dim="chain").values
 
 # Plot non-robust samples
 axes[0].plot(jnp.arange(nonrobust_samples.shape[0]), nonrobust_samples[:, 0], label="Non-robust")
@@ -163,10 +175,9 @@ axes[1].plot(jnp.arange(nonrobust_samples.shape[0]), nonrobust_samples[:, 1], la
 axes[0].plot(jnp.arange(pseudo_huber_samples.shape[0]), pseudo_huber_samples[:, 0], label="Pseudo-Huber")
 axes[1].plot(jnp.arange(pseudo_huber_samples.shape[0]), pseudo_huber_samples[:, 1], label="Pseudo-Huber")
 
-# Plot baseline
-axes[0].axhline(true_a, linestyle="dashed", color="black", label="true parameter")
-axes[1].axhline(true_b, linestyle="dashed", color="black", label="true parameter")
-
+# Plot baseline (true values)
+axes[0].axhline(true_a, linestyle="dashed", color="black", label="True slope")
+axes[1].axhline(true_b, linestyle="dashed", color="black", label="True intercept")
 
 # Titles
 axes[0].set_title("Slope traceplot")
@@ -174,16 +185,13 @@ axes[1].set_title("Intercept traceplot")
 
 # Collect unique legend handles
 handles, labels = axes[0].get_legend_handles_labels()
-
-# Add a single legend below the figure
 fig.legend(handles, labels, loc="lower center", ncol=3, bbox_to_anchor=(0.5, -0.1))
 
 fig.tight_layout()
 plt.show()
-
 # -
 
-ols_fit = fitted(xx, theta_samples.mean(axis=0))
+ols_fit = fitted(xx, nonrobust_samples.mean(axis=0))
 pseudo_huber_fit = fitted(xx, pseudo_huber_samples.mean(axis=0))
 
 # Plot the generated data
@@ -195,5 +203,5 @@ plt.plot(xx_np, pseudo_huber_fit, label="pseudo-Huber fit")
 plt.xlabel("x")
 plt.ylabel("y")
 plt.legend()
-plt.title("Simulated Data for Robust Linear Regression Testing")
+plt.title("Robust Linear Regression from Langevin M-estimators")
 plt.show()

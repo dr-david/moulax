@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 from jax import jit, grad, jacfwd
 from tqdm import tqdm
+import arviz as az
 
 def make_gradient(log_likelihood_fn):
     """
@@ -67,12 +68,20 @@ def step(theta, s, key, step_size, fisher_inv, sqrt_fisher_inv, grad_fn):
 
     return theta, s, key
 
-def preconditioned_ULA(step_fun=None, num_samples=1000, step_size=0.1, fisher_updates=1, key=jax.random.PRNGKey(42), init_theta=None, grad_fn=None):
+def preconditioned_ULA(
+    step_fun=None,
+    num_samples=1000,
+    step_size=0.1,
+    fisher_updates=1,
+    key=jax.random.PRNGKey(42),
+    init_theta=None,
+    grad_fn=None,
+):
     """
-    Runs Preconditioned Unadjusted Langevin Algorithm (P-ULA).
+    Runs Preconditioned Unadjusted Langevin Algorithm (P-ULA) and returns an ArviZ InferenceData object.
 
     Args:
-        step_fun (function): a function to compute the PULA step
+        step_fun (function): Function to compute the PULA step.
         num_samples (int): Number of MCMC iterations.
         step_size (float): Step size for Langevin updates.
         fisher_updates (int): How often to recompute the Fisher matrix.
@@ -81,40 +90,44 @@ def preconditioned_ULA(step_fun=None, num_samples=1000, step_size=0.1, fisher_up
         grad_fn (function): Gradient function that depends only on theta.
 
     Returns:
-        theta_samples: MCMC samples of theta.
+        arviz.InferenceData: MCMC samples in ArviZ format.
     """
     if init_theta is None:
         raise ValueError("Must provide an initial theta vector.")
-
     if grad_fn is None:
         raise ValueError("Must provide a gradient function (grad_fn).")
-
     if step_fun is None:
         raise ValueError("Must provide a step function (step_fun).")
-    
 
     fisher_func = make_fisher_matrix(grad_fn)
 
     # Initialize parameters
-    theta = jnp.array(init_theta)  # Ensure theta is a JAX array
+    theta = jnp.array(init_theta)
     s = 1.0
     theta_samples = []
 
-    # jit
-    fisher_func = jit(fisher_func)
-    grad_fn = jit(grad_fn)
-    step_fun = jit(step_fun, static_argnames=["grad_fn"])  # JIT-compile
-    
+    # JIT compile functions
+    fisher_func = jax.jit(fisher_func)
+    grad_fn = jax.jit(grad_fn)
+    step_fun = jax.jit(step_fun, static_argnames=["grad_fn"])
+
     for i in tqdm(range(num_samples)):
-        if i % fisher_updates == 0:  # Update Fisher matrix every `fisher_updates` steps
+        if i % fisher_updates == 0:
             fisher_matrix = fisher_func(theta)
             fisher_inv = jnp.linalg.inv(fisher_matrix)
             sqrt_fisher_inv = jnp.linalg.cholesky(fisher_inv)
 
         # Perform one step of P-ULA
         theta, s, key = step_fun(theta, s, key, step_size, fisher_inv, sqrt_fisher_inv, grad_fn)
-
+        
         # Store samples
         theta_samples.append(theta)
 
-    return jnp.array(theta_samples)
+    theta_samples = jnp.array(theta_samples)
+
+    # Convert to ArviZ InferenceData
+    return az.from_dict(
+        posterior={"theta": theta_samples[None, :, :]},  # Add chain dimension (single chain)
+        coords={"parameter": ["param_" + str(i) for i in range(theta_samples.shape[1])]},
+        dims={"theta": ["chain", "draw", "parameter"]},
+    )

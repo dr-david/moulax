@@ -12,7 +12,8 @@ dependencies = [
     "jaxlib",
     "numpy",
     "tqdm",
-    "matplotlib"
+    "matplotlib",
+    "arviz"
 ]
 
 [tool.setuptools]
