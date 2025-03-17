@@ -101,9 +101,10 @@ def make_score_fun(
         variance_vals = var_fn(fitted_vals)  # Compute variance estimates
         residual_vals = residual_fn(y, fitted_vals, variance_vals)  # Compute residuals
         influence_vals = influence_fn(residual_vals)  # Compute influence values
+        scaled_influence_vals = influence_vals / jnp.sqrt(variance_vals) # Scale by sqrt variance
 
-        # Compute score: influence * fitted gradient
-        score = influence_vals[:, None] * fit_grad_fn(theta)  # Broadcasting over all observations
+        # Compute score: scaled influence * fitted gradient
+        score = scaled_influence_vals[:, None] * fit_grad_fn(theta)  # Broadcasting over all observations
 
         return jnp.sum(score, axis=0)  # Sum over all observations (TODO: averaging)
 
