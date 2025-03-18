@@ -67,7 +67,8 @@ def make_score_fun(
     residual_fn=pearson_residuals, 
     fit_fn=None, 
     var_fn=None,
-    fit_grad_fn=None 
+    fit_grad_fn=None, 
+    average=True,
 ):
     """
     Constructs a score function for estimating parameters via M-estimation.
@@ -106,6 +107,30 @@ def make_score_fun(
         # Compute score: scaled influence * fitted gradient
         score = scaled_influence_vals[:, None] * fit_grad_fn(theta)  # Broadcasting over all observations
 
-        return jnp.sum(score, axis=0)  # Sum over all observations (TODO: averaging)
+        if average:
+            return jnp.mean(score, axis=0)  # Average over all observations
+        else:
+            return jnp.sum(score, axis=0)  # Sum over all observations
 
     return score_fun
+
+def identity_fisher(theta):
+    return jnp.eye(theta.shape[0])
+
+def make_normal_prior(mu, sigma):
+    """
+    Returns a function that computes the gradient of the log-prior for a normal distribution.
+
+    Args:
+        mu (array): Mean vector of the normal prior.
+        sigma (array): Standard deviation vector of the normal prior.
+
+    Returns:
+        A function that computes ∇ log p(θ) given θ.
+    """
+    sigma_sq_inv = 1 / (sigma ** 2)  # Precompute inverse variance
+
+    def prior_grad(theta):
+        return -(theta - mu) * sigma_sq_inv  # Gradient of log-prior
+
+    return prior_grad

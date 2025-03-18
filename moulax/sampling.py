@@ -54,7 +54,7 @@ def make_fisher_matrix_outer(grad_fn):
 
     return fisher_fn
 
-def step(theta, s, key, step_size, fisher_inv, sqrt_fisher_inv, grad_fn, return_grad=False):
+def step(theta, s, key, step_size, fisher_inv, sqrt_fisher_inv, grad_fn, return_grad=False, n_samples=1.0):
     """
     Performs a single Langevin update step for theta.
 
@@ -84,7 +84,7 @@ def step(theta, s, key, step_size, fisher_inv, sqrt_fisher_inv, grad_fn, return_
     noise_term = sqrt_fisher_inv @ noise_vec
 
     # Langevin Update for parameters
-    update = (step_size / 2) * preconditioned_grad + jnp.sqrt(step_size) * noise_term * jnp.sqrt(s)
+    update = (step_size / 2) * preconditioned_grad + jnp.sqrt(step_size) * noise_term * jnp.sqrt(s) / jnp.sqrt(n_samples)
     theta = theta + update  # Update parameters
 
     if return_grad:
@@ -104,6 +104,7 @@ def preconditioned_ULA(
     quasi=False,
     fisher_func=None,
     return_grad=False,
+    n_samples=1.0,
 ):
     """
     Runs Preconditioned Unadjusted Langevin Algorithm (P-ULA) and returns an ArviZ InferenceData object.
@@ -153,10 +154,10 @@ def preconditioned_ULA(
 
         # Perform one step of P-ULA
         if return_grad:
-            theta, s, key, grad_vec = step_fun(theta, s, key, step_size, fisher_inv, sqrt_fisher_inv, grad_fn, return_grad=True)
+            theta, s, key, grad_vec = step_fun(theta, s, key, step_size, fisher_inv, sqrt_fisher_inv, grad_fn, return_grad=True, n_samples=n_samples)
             grad_samples.append(grad_vec)  # Store gradient
         else:
-            theta, s, key = step_fun(theta, s, key, step_size, fisher_inv, sqrt_fisher_inv, grad_fn)
+            theta, s, key = step_fun(theta, s, key, step_size, fisher_inv, sqrt_fisher_inv, grad_fn, n_samples=n_samples)
 
         # Store samples
         theta_samples.append(theta)

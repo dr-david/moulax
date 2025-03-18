@@ -16,10 +16,10 @@ import jax.numpy as jnp
 import jax
 import jax.random as random
 import matplotlib.pyplot as plt
-from moulax.sampling import step, preconditioned_ULA, make_fisher_matrix, make_fisher_matrix_outer
+from moulax.sampling import step, preconditioned_ULA, make_fisher_matrix
 import arviz as az
-from moulax.utils import pearson_residuals, make_fit_grad_fn, make_score_fun
-from moulax.psifun import ols_psi, pseudo_huber_psi, huber_psi
+from moulax.utils import pearson_residuals, make_fit_grad_fn, make_score_fun, identity_fisher, make_normal_prior
+from moulax.psifun import ols_psi, pseudo_huber_psi, huber_psi, tukey_bisquare_psi
 
 
 # # Simulate data
@@ -37,7 +37,7 @@ xx = jnp.linspace(-2, 2, N)  # Now centered for logit transformation
 
 # Define true function parameters
 true_a = 2.0
-true_b = -0.5  # Some bias term
+true_b = 1.5  # Some bias term
 
 # Compute true probabilities using inverse logit
 def sigmoid(eta):
@@ -50,6 +50,9 @@ p_true = sigmoid(eta_true)  # Probabilities
 n_trials = 1
 key, subkey = random.split(key)
 Y = random.binomial(subkey, n=n_trials, p=p_true)
+
+# Add outliers
+Y = Y.at[-int(N/20):].set(0)
 
 # Convert to NumPy for plotting
 xx_np = jnp.array(xx)
@@ -73,19 +76,16 @@ def binomial_fit(x, theta):
 # Define variance function for binomial
 def binomial_variance(fitted):
     """Computes binomial variance: p * (1 - p)."""
-    return fitted * (1 - fitted) + 1E-6 #avoid overflow
+    return fitted * (1 - fitted) + 1E-10 #avoid overflow
 
 
 # -
 
 # # Sample
 
-def identity_fisher(theta):
-    return jnp.eye(theta.shape[0])
-
-
 # +
 # %%time 
+n_samples = xx.shape[0]
 nonrobust_grad = make_score_fun(
     xx, Y,
     influence_fn=ols_psi, #
@@ -93,13 +93,19 @@ nonrobust_grad = make_score_fun(
     fit_fn=binomial_fit, 
     var_fn=binomial_variance,
     fit_grad_fn=None, # yes)
+    average=True
 )
+normal_prior = make_normal_prior(jnp.array([0, 0]), 10.0 * n_samples)
+def nonrobust_post_grad(theta):
+    return nonrobust_grad(theta) + normal_prior(theta)
+
 nonrobust_fisher = make_fisher_matrix(nonrobust_grad)
 
 init_theta = jnp.array([0.0, 0.0])  
 
 nonrobust_samples = preconditioned_ULA(
-    step, num_samples=10_000, step_size=0.1, fisher_updates=1, init_theta=init_theta, grad_fn=nonrobust_grad, return_grad=True, fisher_func=identity_fisher
+    step, num_samples=10_000, step_size=0.1, fisher_updates=1, init_theta=init_theta,
+    grad_fn=nonrobust_post_grad, return_grad=True, fisher_func=nonrobust_fisher, n_samples=n_samples
 )
 
 # -
@@ -107,110 +113,97 @@ nonrobust_samples = preconditioned_ULA(
 az.plot_trace(nonrobust_samples)
 plt.tight_layout()
 
-
-
 # +
 # %%time 
-def infl_fun(x):
-    return pseudo_huber_psi(x, 3)
-
+n_samples = xx.shape[0]
 pseudohuber_grad = make_score_fun(
     xx, Y,
-    influence_fn=infl_fun, #
+    influence_fn=lambda theta: huber_psi(theta, 2), #
     residual_fn=pearson_residuals, #
-    fit_fn=binomial_fit, # eg linear_fit
-    var_fn=binomial_variance, # constant_var
+    fit_fn=binomial_fit, 
+    var_fn=binomial_variance,
     fit_grad_fn=None, # yes)
+    average=True
 )
-init_theta = jnp.array([0.0, 0.0])  
-
-pseudo_huber_samples = preconditioned_ULA(
-    step, num_samples=10_000, step_size=0.1, fisher_updates=1, init_theta=init_theta, grad_fn=pseudohuber_grad, return_grad=True, fisher_func=identity_fisher
-)
-
-# -
+normal_prior = make_normal_prior(jnp.array([0, 0]), 10.0 * n_samples)
+def pseudohuber_post_grad(theta):
+    return pseudohuber_grad(theta) + normal_prior(theta)
 
 pseudohuber_fisher = make_fisher_matrix(pseudohuber_grad)
-nonrobust_fisher = make_fisher_matrix(nonrobust_grad)
 
-# +
-# Extract posterior samples for theta
-theta_samples = pseudo_huber_samples.posterior["theta"].values  # Shape: (chains, draws, parameters)
+init_theta = jnp.array([0.0, 0.0])  
 
-# Find last valid index along the draw axis
-valid_mask = ~jnp.isnan(theta_samples)  # True where values are not NaN
+pseudohuber_samples = preconditioned_ULA(
+    step,
+    num_samples=10_000,
+    step_size=0.1,
+    fisher_updates=10,
+    init_theta=init_theta,
+    grad_fn=pseudohuber_post_grad,
+    return_grad=True,
+    fisher_func=nonrobust_fisher,
+    n_samples=n_samples
+)
 
-# Create an index array that matches theta_samples shape
-index_array = jnp.arange(theta_samples.shape[1]).reshape(1, -1, 1)  # Reshape to (1, 100, 1)
-
-# Replace invalid indices with -1
-last_valid_index = jnp.max(jnp.where(valid_mask, index_array, -1), axis=1)  # Shape: (1, parameters)
-
-# Retrieve the last non-NaN value for each parameter
-last_valid_theta = jnp.take_along_axis(theta_samples, last_valid_index[:, None, :], axis=1).squeeze(1)[0]
-last_valid_theta
 # -
 
-last_valid_theta = jnp.array([ 2.0, -0.5 ])
-
-fitted_vals = binomial_fit(xx, last_valid_theta)
-variance_vals = binomial_variance(fitted_vals)
-residual_vals = pearson_residuals(Y, fitted_vals, variance_vals) 
-influence_vals = pseudo_huber_psi(residual_vals, 3)
-influence_vals_ols = ols_psi(residual_vals)
+az.plot_trace(pseudohuber_samples)
+plt.tight_layout()
 
 # +
 fig, axes = plt.subplots(1,2, figsize=(10,3))
 
-rr = jnp.linspace(-10,10,100)
-axes[0].plot(rr, ols_psi(rr))
-axes[0].plot(rr, pseudo_huber_psi(rr, 3))
+theta_mean =  pseudohuber_samples.posterior["theta"].mean(dim=("chain", "draw")).values
+fitted_vals = binomial_fit(xx, theta_mean)
+variance_vals = binomial_variance(fitted_vals)
+residual_vals = pearson_residuals(Y, fitted_vals, variance_vals) 
+influence_vals = huber_psi(residual_vals, 2.0)
+
+print(influence_vals.mean())
+print(pseudohuber_grad(theta_mean))
 
 
-# +
-fig, axes = plt.subplots(1,3, figsize=(10,3))
-
-axes[0].hist(residual_vals)
-axes[1].hist(influence_vals)
-axes[2].hist(influence_vals_ols)
+axes[0].hist(residual_vals, bins=30)
+axes[0].set_title("Pearson residuals")
+axes[1].hist(influence_vals, bins=30)
+axes[1].set_title("Huberized Pearson residuals")
 
 fig.show()
-# -
-
-pseudohuber_grad(last_valid_theta)
-
-
-fish_ols = nonrobust_fisher(last_valid_theta)
-print(fish_ols)
-print(jnp.linalg.inv(fish_ols))
-
-fish_hub = pseudohuber_fisher(last_valid_theta[0])
-print(fish_hub)
-print(jnp.linalg.inv(fish_hub))
-
-az.plot_trace(pseudo_huber_samples)
-
- nonrobust_samples.posterior["theta"].mean(dim=("chain", "draw")).values
 
 # +
-theta_mean = nonrobust_samples.posterior["theta"].mean(dim=("chain", "draw")).values
+from moulax.utils import robust_mean
+
+print(f"mean square pearson residuals: {jnp.sum(residual_vals**2) / (n_samples -2)}")
+
+## ddof = sum of the weights - p_params. the weights * residuals = psi_fun(residuals)
+
+ddof = jnp.sum(influence_vals / residual_vals) -2
+print(f"mean square huberized pearson residuals: {jnp.sum(influence_vals**2) / ddof}")
+print(f"huberized mean square pearson residuals: {robust_mean(influence_vals**2)}")
+
+
+
+# +
+theta_mean = nonrobust_samples.sel(draw=slice(1001, None)).posterior["theta"].mean(dim=("chain", "draw")).values
 ols_fit = binomial_fit(xx, theta_mean)
 
-theta_mean = pseudo_huber_samples.posterior["theta"].mean(dim=("chain", "draw")).values
+theta_mean = pseudohuber_samples.sel(draw=slice(1001, None)).posterior["theta"].mean(dim=("chain", "draw")).values
 pseudo_huber_fit = binomial_fit(xx, theta_mean)
 # pseudo_huber_fit = binomial_fit(xx, last_valid_theta)
 # -
-
-last_valid_theta
 
 # Plot the generated data
 plt.figure(figsize=(8, 5))
 plt.scatter(xx_np, Y, label="Observed)", color="black", alpha=.5)
 plt.plot(xx_np, p_true, label="True function", linestyle="dashed", color="black")
-plt.plot(xx_np, ols_fit, label="nonrobust fit")
-plt.plot(xx_np, pseudo_huber_fit, label="pseudo-Huber fit")
+plt.plot(xx_np, ols_fit, label="nonrobust")
+plt.plot(xx_np, pseudo_huber_fit, label="Huber")
+# plt.plot(xx_np, binomial_fit(xx_np, thetas[-1]))
 plt.xlabel("x")
 plt.ylabel("y")
 plt.legend()
-plt.title("Robust Logistic Regression from Langevin M-estimators")
+plt.title("Quasi-Bayesian Robust Logistic Regression from Langevin M-estimators")
 plt.show()
+
+az.plot_posterior(nonrobust_samples.posterior["theta"])
+az.plot_posterior(pseudohuber_samples.posterior["theta"])
