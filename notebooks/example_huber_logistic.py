@@ -96,8 +96,8 @@ nonrobust_grad = make_score_fun(
     average=True
 )
 normal_prior = make_normal_prior(jnp.array([0, 0]), 10.0 * n_samples)
-def nonrobust_post_grad(theta):
-    return nonrobust_grad(theta) + normal_prior(theta)
+def nonrobust_post_grad(theta, overdispersion):
+    return nonrobust_grad(theta, overdispersion) + normal_prior(theta)
 
 nonrobust_fisher = make_fisher_matrix(nonrobust_grad)
 
@@ -116,9 +116,10 @@ plt.tight_layout()
 # +
 # %%time 
 n_samples = xx.shape[0]
+huber_c = 2
 pseudohuber_grad = make_score_fun(
     xx, Y,
-    influence_fn=lambda theta: huber_psi(theta, 2), #
+    influence_fn=lambda theta: huber_psi(theta, huber_c), #
     residual_fn=pearson_residuals, #
     fit_fn=binomial_fit, 
     var_fn=binomial_variance,
@@ -126,12 +127,12 @@ pseudohuber_grad = make_score_fun(
     average=True
 )
 normal_prior = make_normal_prior(jnp.array([0, 0]), 10.0 * n_samples)
-def pseudohuber_post_grad(theta):
-    return pseudohuber_grad(theta) + normal_prior(theta)
+def pseudohuber_post_grad(theta, overdispersion):
+    return pseudohuber_grad(theta, overdispersion) + normal_prior(theta)
 
 pseudohuber_fisher = make_fisher_matrix(pseudohuber_grad)
 
-init_theta = jnp.array([0.0, 0.0])  
+init_theta = jnp.array([0.1, 0.0])  
 
 pseudohuber_samples = preconditioned_ULA(
     step,
@@ -151,37 +152,64 @@ az.plot_trace(pseudohuber_samples)
 plt.tight_layout()
 
 # +
-fig, axes = plt.subplots(1,2, figsize=(10,3))
+# # %%time 
+# n_samples = xx.shape[0]
+# tukey_c = 5.0
+# tukey_grad = make_score_fun(
+#     xx, Y,
+#     influence_fn=lambda theta: tukey_bisquare_psi(theta, tukey_c), #
+#     residual_fn=pearson_residuals, #
+#     fit_fn=binomial_fit, 
+#     var_fn=binomial_variance,
+#     fit_grad_fn=None, # yes)
+#     average=True
+# )
+# normal_prior = make_normal_prior(jnp.array([0, 0]), 10.0 * n_samples)
+# def tukey_post_grad(theta, overdispersion):
+#     return tukey_grad(theta, overdispersion) + normal_prior(theta)
 
-theta_mean =  pseudohuber_samples.posterior["theta"].mean(dim=("chain", "draw")).values
-fitted_vals = binomial_fit(xx, theta_mean)
-variance_vals = binomial_variance(fitted_vals)
-residual_vals = pearson_residuals(Y, fitted_vals, variance_vals) 
-influence_vals = huber_psi(residual_vals, 2.0)
 
-print(influence_vals.mean())
-print(pseudohuber_grad(theta_mean))
+# init_theta = jnp.array([2.0, 1.5])  
 
+# tukey_samples = preconditioned_ULA(
+#     step,
+#     num_samples=10_000,
+#     step_size=0.1,
+#     fisher_updates=10,
+#     init_theta=init_theta,
+#     grad_fn=tukey_post_grad,
+#     return_grad=True,
+#     fisher_func=nonrobust_fisher,
+#     n_samples=n_samples
+# )
 
-axes[0].hist(residual_vals, bins=30)
-axes[0].set_title("Pearson residuals")
-axes[1].hist(influence_vals, bins=30)
-axes[1].set_title("Huberized Pearson residuals")
-
-fig.show()
 
 # +
-from moulax.utils import robust_mean
+# az.plot_trace(tukey_samples)
+# plt.tight_layout()
+# -
 
-print(f"mean square pearson residuals: {jnp.sum(residual_vals**2) / (n_samples -2)}")
+true_a, true_b
 
-## ddof = sum of the weights - p_params. the weights * residuals = psi_fun(residuals)
+# +
+fig, axes = plt.subplots(1,4, figsize=(14,3))
 
-ddof = jnp.sum(influence_vals / residual_vals) -2
-print(f"mean square huberized pearson residuals: {jnp.sum(influence_vals**2) / ddof}")
-print(f"huberized mean square pearson residuals: {robust_mean(influence_vals**2)}")
+rr = jnp.linspace(-2,2,100)
 
+axes[0].plot(rr, rr, label="OLS")
+axes[0].plot(rr, huber_psi(rr, 0.12), label="QuasiHuber")
+axes[0].plot(rr, tukey_bisquare_psi(rr, 1.0), label="Tukey")
+axes[0].set_ylim([-1/3,1/3])
+axes[0].legend()
+axes[0].set_title("influence functions")
 
+scaled_residuals = pearson_residuals(Y, p_true, binomial_variance(p_true))
+axes[1].hist(scaled_residuals)
+axes[1].set_title("residuals at true value")
+axes[2].hist(huber_psi(scaled_residuals, huber_c))
+axes[2].set_title("Huber residuals at true value")
+axes[3].hist(tukey_bisquare_psi(scaled_residuals , 6.0))
+axes[3].set_title("Tukey residuals at true value")
 
 # +
 theta_mean = nonrobust_samples.sel(draw=slice(1001, None)).posterior["theta"].mean(dim=("chain", "draw")).values
@@ -205,5 +233,61 @@ plt.legend()
 plt.title("Quasi-Bayesian Robust Logistic Regression from Langevin M-estimators")
 plt.show()
 
-az.plot_posterior(nonrobust_samples.posterior["theta"])
-az.plot_posterior(pseudohuber_samples.posterior["theta"])
+# +
+# Create figure with two subplots (one for 'a', one for 'b')
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+# Extract posterior samples for 'a' and 'b'
+theta_nonrobust = nonrobust_samples.posterior["theta"].values  # Convert to NumPy array if needed
+theta_pseudohuber = pseudohuber_samples.posterior["theta"].values
+
+# Plot posterior distribution for 'a'
+az.plot_posterior(theta_nonrobust[..., 0], ax=axes[0], label="Non-Robust", color="blue")
+az.plot_posterior(theta_pseudohuber[..., 0], ax=axes[0], label="Pseudo-Huber", color="orange")
+axes[0].axvline(true_a, color='red', linestyle="--", label="True a")
+axes[0].set_title("Posterior of a")
+axes[0].legend()
+
+# Plot posterior distribution for 'b'
+az.plot_posterior(theta_nonrobust[..., 1], ax=axes[1], label="Non-Robust", color="blue")
+az.plot_posterior(theta_pseudohuber[..., 1], ax=axes[1], label="Pseudo-Huber", color="orange")
+axes[1].axvline(true_b, color='red', linestyle="--", label="True b")
+axes[1].set_title("Posterior of b")
+axes[1].legend()
+
+# Show the figure
+plt.tight_layout()
+plt.show()
+
+# +
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Extract posterior samples for 'a' and 'b' from both samplers
+a_nonrobust = theta_nonrobust[..., 0].flatten()
+b_nonrobust = theta_nonrobust[..., 1].flatten()
+a_pseudohuber = theta_pseudohuber[..., 0].flatten()
+b_pseudohuber = theta_pseudohuber[..., 1].flatten()
+
+# Create figure and axis
+fig, ax = plt.subplots(figsize=(8, 6))
+
+# Plot contour for non-robust sampler
+sns.kdeplot(x=a_nonrobust, y=b_nonrobust, levels=5, color="blue", linestyle="solid", label="Non-Robust", ax=ax)
+
+# Plot contour for pseudo-Huber sampler
+sns.kdeplot(x=a_pseudohuber, y=b_pseudohuber, levels=5, color="orange", linestyle="dashed", label="Pseudo-Huber", ax=ax)
+
+# Plot true value as an 'X' marker
+ax.scatter(true_a, true_b, color='red', marker='x', s=100, label="True Value")
+
+# Labels and legend
+ax.set_xlabel("a")
+ax.set_ylabel("b")
+ax.set_title("Posterior Distribution of (a, b)")
+ax.legend()
+
+# Show plot
+plt.show()
+

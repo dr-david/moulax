@@ -27,17 +27,18 @@ def make_fisher_matrix(grad_fn):
     Computes the Fisher Information Matrix from the provided gradient function.
 
     Args:
-        grad_fn: Function that computes gradients w.r.t. theta.
+        grad_fn: Function that computes gradients w.r.t. theta, according to some overdispersion value
 
     Returns:
         Fisher Information Matrix (Jacobian of grad_fn).
     """
-    def fisher_fn(theta):
-        return -jacfwd(grad_fn)(theta) + 1e-6 * jnp.eye(theta.shape[0])  # Ensure positive definiteness
+    def fisher_fn(theta, overdispersion):
+        grad_fn_s = lambda theta: grad_fn(theta, overdispersion)
+        return -jacfwd(grad_fn_s)(theta) + 1e-6 * jnp.eye(theta.shape[0])  # Ensure positive definiteness
     
     return fisher_fn
 
-def make_fisher_matrix_outer(grad_fn):
+def make_fisher_matrix_outer(grad_fn): #Deprecated
     """
     Computes the Fisher Information Matrix using the outer product of the gradient.
 
@@ -54,7 +55,7 @@ def make_fisher_matrix_outer(grad_fn):
 
     return fisher_fn
 
-def step(theta, s, key, step_size, fisher_inv, sqrt_fisher_inv, grad_fn, return_grad=False, n_samples=1.0):
+def step(theta, overdispersion, key, step_size, fisher_inv, sqrt_fisher_inv, grad_fn, return_grad=False, n_samples=1.0):
     """
     Performs a single Langevin update step for theta.
 
@@ -74,7 +75,7 @@ def step(theta, s, key, step_size, fisher_inv, sqrt_fisher_inv, grad_fn, return_
     key, noise_key1 = jax.random.split(key, 2)
 
     # Compute gradient of log-likelihood
-    grad_vec = grad_fn(theta)
+    grad_vec = grad_fn(theta, overdispersion)
 
     # Preconditioned Gradient Update
     preconditioned_grad = fisher_inv @ grad_vec  
@@ -84,14 +85,14 @@ def step(theta, s, key, step_size, fisher_inv, sqrt_fisher_inv, grad_fn, return_
     noise_term = sqrt_fisher_inv @ noise_vec
 
     # Langevin Update for parameters
-    update = (step_size / 2) * preconditioned_grad + jnp.sqrt(step_size) * noise_term * jnp.sqrt(s) / jnp.sqrt(n_samples)
+    update = (step_size / 2) * preconditioned_grad + jnp.sqrt(step_size) * noise_term * jnp.sqrt(overdispersion) / jnp.sqrt(n_samples)
     theta = theta + update  # Update parameters
 
     if return_grad:
-        return theta, s, key, grad_vec
+        return theta, overdispersion, key, grad_vec
     else:
-        return theta, s, key
-
+        return theta, overdispersion, key
+    
 
 def preconditioned_ULA(
     step_fun=None,
@@ -101,7 +102,6 @@ def preconditioned_ULA(
     key=jax.random.PRNGKey(42),
     init_theta=None,
     grad_fn=None,
-    quasi=False,
     fisher_func=None,
     return_grad=False,
     n_samples=1.0,
@@ -128,37 +128,56 @@ def preconditioned_ULA(
         raise ValueError("Must provide a gradient function (grad_fn).")
     if step_fun is None:
         raise ValueError("Must provide a step function (step_fun).")
-    if fisher_func is None:
+    if fisher_func is None: # TODO this is not the fisher, it takes the prior into account !
         fisher_func = make_fisher_matrix(grad_fn)
 
     # Initialize parameters
     theta = jnp.array(init_theta)
-    s = 1.0
+    overdispersion = 1.0
     theta_samples = []
     grad_samples = [] if return_grad else None  # Store gradients if needed
 
     # JIT compile functions
     fisher_func = jax.jit(fisher_func)
     grad_fn = jax.jit(grad_fn)
-    step_fun = jax.jit(step_fun, static_argnames=["grad_fn", "return_grad"])
+    step_fun = jax.jit(step_fun, static_argnames=["grad_fn", "return_grad"]) #why is it slow if I uncomment this ??
 
+    # Iterate and sample 
     for i in tqdm(range(num_samples)):
         if i % fisher_updates == 0:
-            fisher_matrix = fisher_func(theta)
+            fisher_matrix = fisher_func(theta, overdispersion)
             fisher_inv = jnp.linalg.inv(fisher_matrix)
             sqrt_fisher_inv = jnp.linalg.cholesky(fisher_inv)
             # Check for NaNs in Cholesky decomposition
             if jnp.any(jnp.isnan(sqrt_fisher_inv)):
                 warnings.warn(f"Cholesky decomposition resulted in NaNs at step {i}.", RuntimeWarning)
 
-
         # Perform one step of P-ULA
         if return_grad:
-            theta, s, key, grad_vec = step_fun(theta, s, key, step_size, fisher_inv, sqrt_fisher_inv, grad_fn, return_grad=True, n_samples=n_samples)
+            theta, overdispersion, key, grad_vec = step_fun(
+                theta,
+                overdispersion,
+                key,
+                step_size,
+                fisher_inv,
+                sqrt_fisher_inv,
+                grad_fn,
+                return_grad=True,
+                n_samples=n_samples
+                )
             grad_samples.append(grad_vec)  # Store gradient
         else:
-            theta, s, key = step_fun(theta, s, key, step_size, fisher_inv, sqrt_fisher_inv, grad_fn, n_samples=n_samples)
-
+            theta, overdispersion, key = theta, overdispersion, key, grad_vec = step_fun(
+                theta,
+                overdispersion,
+                key,
+                step_size,
+                fisher_inv,
+                sqrt_fisher_inv,
+                grad_fn,
+                return_grad=False,
+                n_samples=n_samples
+                )
         # Store samples
         theta_samples.append(theta)
 

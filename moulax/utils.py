@@ -83,12 +83,12 @@ def make_score_fun(
         fit_grad_fn (function, optional): Function computing the Jacobian of fitted values.
 
     Returns:
-        function: Score function that takes `theta` as input and computes the score.
+        function: Score function that takes `theta` and overdispersion as input and computes the score.
     """
     if fit_grad_fn is None:
         fit_grad_fn = make_fit_grad_fn(x, fit_fn)  # Compute ∇ fitted(x, theta)
 
-    def score_fun(theta):
+    def score_fun(theta, overdispersion):
         """
         Computes the score function for given parameter values theta.
 
@@ -99,7 +99,7 @@ def make_score_fun(
             array: Score function value (gradient of loss).
         """
         fitted_vals = fit_fn(x, theta)  # Compute fitted values
-        variance_vals = var_fn(fitted_vals)  # Compute variance estimates
+        variance_vals = overdispersion * var_fn(fitted_vals)  # Compute variance estimates
         residual_vals = residual_fn(y, fitted_vals, variance_vals)  # Compute residuals
         influence_vals = influence_fn(residual_vals)  # Compute influence values
         scaled_influence_vals = influence_vals / jnp.sqrt(variance_vals) # Scale by sqrt variance
@@ -134,3 +134,11 @@ def make_normal_prior(mu, sigma):
         return -(theta - mu) * sigma_sq_inv  # Gradient of log-prior
 
     return prior_grad
+
+
+def overdispersion_mom(pearson_residuals, psi_fun, p_params):
+    """compute overdispersion with the MoM estimator"""
+    influence_vals = psi_fun(pearson_residuals)
+    ddof = jnp.sum(influence_vals / pearson_residuals) - p_params # w * r = \psi 
+    
+    return jnp.sum(influence_vals**2) / ddof
