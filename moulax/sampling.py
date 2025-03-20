@@ -5,7 +5,7 @@ from tqdm import tqdm
 import arviz as az
 import warnings
 
-from .utils import robust_mean
+from .utils import robust_mean, overdispersion_mom
 
 def make_gradient(log_likelihood_fn):
     """
@@ -105,6 +105,14 @@ def preconditioned_ULA(
     fisher_func=None,
     return_grad=False,
     n_samples=1.0,
+    fit_fn=None, 
+    var_fn=None,
+    x=None,
+    y=None,
+    residual_fn=None, 
+    psi_fun=None,
+    overdisp_fn = None,
+    
 ):
     """
     Runs Preconditioned Unadjusted Langevin Algorithm (P-ULA) and returns an ArviZ InferenceData object.
@@ -136,11 +144,18 @@ def preconditioned_ULA(
     overdispersion = 1.0
     theta_samples = []
     grad_samples = [] if return_grad else None  # Store gradients if needed
+    overdispersion_samples = []
 
     # JIT compile functions
     fisher_func = jax.jit(fisher_func)
     grad_fn = jax.jit(grad_fn)
     step_fun = jax.jit(step_fun, static_argnames=["grad_fn", "return_grad"]) #why is it slow if I uncomment this ??
+    if overdisp_fn is not None:
+        fit_fn = jax.jit(fit_fn)
+        var_fn = jax.jit(var_fn)
+        residual_fn = jax.jit(residual_fn)
+        overdisp_fn = jax.jit(overdisp_fn, static_argnames=["psi_fun"])
+    
 
     # Iterate and sample 
     for i in tqdm(range(num_samples)):
@@ -181,6 +196,15 @@ def preconditioned_ULA(
         # Store samples
         theta_samples.append(theta)
 
+        # update overdispersion
+        if overdisp_fn is not None:
+            fitted_vals = fit_fn(x, theta)  # Compute fitted values
+            variance_vals = var_fn(fitted_vals)  # Compute variance estimates
+            residual_vals = residual_fn(y, fitted_vals, variance_vals)  # Compute residuals
+            
+            overdispersion = overdisp_fn(residual_vals, psi_fun, 2.0) # compute overdispersion 
+        overdispersion_samples.append(overdispersion)
+
     theta_samples = jnp.array(theta_samples)
 
     # Convert to ArviZ InferenceData
@@ -195,5 +219,10 @@ def preconditioned_ULA(
         grad_samples = jnp.array(grad_samples)
         inference_dict["posterior"]["grad"] = grad_samples[None, :, :]  # Add chain dimension
         inference_dict["dims"]["grad"] = ["chain", "draw", "parameter"]
+    
+    overdispersion_samples = jnp.array(overdispersion_samples)
+
+    inference_dict["posterior"]["overdispersion"] = overdispersion_samples[None, :]  # Add chain dimension
+    inference_dict["dims"]["overdispersion"] = ["chain", "draw"]
 
     return az.from_dict(**inference_dict)

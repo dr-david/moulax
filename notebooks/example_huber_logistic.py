@@ -18,7 +18,7 @@ import jax.random as random
 import matplotlib.pyplot as plt
 from moulax.sampling import step, preconditioned_ULA, make_fisher_matrix
 import arviz as az
-from moulax.utils import pearson_residuals, make_fit_grad_fn, make_score_fun, identity_fisher, make_normal_prior
+from moulax.utils import pearson_residuals, make_fit_grad_fn, make_score_fun, identity_fisher, make_normal_prior, overdispersion_mom
 from moulax.psifun import ols_psi, pseudo_huber_psi, huber_psi, tukey_bisquare_psi
 
 
@@ -104,7 +104,7 @@ nonrobust_fisher = make_fisher_matrix(nonrobust_grad)
 init_theta = jnp.array([0.0, 0.0])  
 
 nonrobust_samples = preconditioned_ULA(
-    step, num_samples=10_000, step_size=0.1, fisher_updates=1, init_theta=init_theta,
+    step, num_samples=100_000, step_size=0.1, fisher_updates=1, init_theta=init_theta,
     grad_fn=nonrobust_post_grad, return_grad=True, fisher_func=nonrobust_fisher, n_samples=n_samples
 )
 
@@ -112,6 +112,25 @@ nonrobust_samples = preconditioned_ULA(
 
 az.plot_trace(nonrobust_samples)
 plt.tight_layout()
+
+
+# +
+def make_weird_prior(mu, sigma, strength):
+    def prior_grad(theta):
+        # Compute Euclidean distance from theta to mu
+        radial_dist = jnp.linalg.norm(theta - mu)
+        
+        # Compute unit vector pointing toward mu (avoid division by zero)
+        direction = (mu - theta) / (radial_dist + 1e-8)
+        
+        # Apply condition using jnp.where: If inside sigma, return 0; else, return scaled direction
+        return jnp.where(radial_dist < sigma, jnp.zeros_like(theta), strength * direction)
+
+    return prior_grad
+
+make_weird_prior(jnp.array([0,0]), 2.0, 1.0)(jnp.array([3.0,2.0]))
+# make_weird_prior(jnp.array([0,0]), 4.0, 1.0)
+# normal_prior(jnp.array([3.0,2.0]))
 
 # +
 # %%time 
@@ -127,8 +146,13 @@ pseudohuber_grad = make_score_fun(
     average=True
 )
 normal_prior = make_normal_prior(jnp.array([0, 0]), 10.0 * n_samples)
+
+weird_prior = make_weird_prior(jnp.array([0,0]), 4.0, 1.0)
+
+
 def pseudohuber_post_grad(theta, overdispersion):
-    return pseudohuber_grad(theta, overdispersion) + normal_prior(theta)
+    return pseudohuber_grad(theta, overdispersion) + weird_prior(theta)
+
 
 pseudohuber_fisher = make_fisher_matrix(pseudohuber_grad)
 
@@ -136,7 +160,7 @@ init_theta = jnp.array([0.1, 0.0])
 
 pseudohuber_samples = preconditioned_ULA(
     step,
-    num_samples=10_000,
+    num_samples=100_000,
     step_size=0.1,
     fisher_updates=10,
     init_theta=init_theta,
@@ -152,44 +176,43 @@ az.plot_trace(pseudohuber_samples)
 plt.tight_layout()
 
 # +
-# # %%time 
-# n_samples = xx.shape[0]
-# tukey_c = 5.0
-# tukey_grad = make_score_fun(
-#     xx, Y,
-#     influence_fn=lambda theta: tukey_bisquare_psi(theta, tukey_c), #
-#     residual_fn=pearson_residuals, #
-#     fit_fn=binomial_fit, 
-#     var_fn=binomial_variance,
-#     fit_grad_fn=None, # yes)
-#     average=True
-# )
-# normal_prior = make_normal_prior(jnp.array([0, 0]), 10.0 * n_samples)
-# def tukey_post_grad(theta, overdispersion):
-#     return tukey_grad(theta, overdispersion) + normal_prior(theta)
+# %%time 
+n_samples = xx.shape[0]
+tukey_c = 8.0
+tukey_grad = make_score_fun(
+    xx, Y,
+    influence_fn=lambda theta: tukey_bisquare_psi(theta, tukey_c), #
+    residual_fn=pearson_residuals, #
+    fit_fn=binomial_fit, 
+    var_fn=binomial_variance,
+    fit_grad_fn=None, # yes)
+    average=True
+)
+normal_prior = make_normal_prior(jnp.array([0, 0]), 10.0 * n_samples)
+weird_prior = make_weird_prior(jnp.array([0,0]), 4.0, 1.0)
+
+def tukey_post_grad(theta, overdispersion):
+    return tukey_grad(theta, overdispersion) + weird_prior(theta)
 
 
-# init_theta = jnp.array([2.0, 1.5])  
+init_theta = jnp.array([2.0, 1.5])  
 
-# tukey_samples = preconditioned_ULA(
-#     step,
-#     num_samples=10_000,
-#     step_size=0.1,
-#     fisher_updates=10,
-#     init_theta=init_theta,
-#     grad_fn=tukey_post_grad,
-#     return_grad=True,
-#     fisher_func=nonrobust_fisher,
-#     n_samples=n_samples
-# )
+tukey_samples = preconditioned_ULA(
+    step,
+    num_samples=100_000,
+    step_size=0.1,
+    fisher_updates=10,
+    init_theta=init_theta,
+    grad_fn=tukey_post_grad,
+    return_grad=True,
+    fisher_func=nonrobust_fisher,
+    n_samples=n_samples
+)
 
-
-# +
-# az.plot_trace(tukey_samples)
-# plt.tight_layout()
 # -
 
-true_a, true_b
+az.plot_trace(tukey_samples)
+plt.tight_layout()
 
 # +
 fig, axes = plt.subplots(1,4, figsize=(14,3))
@@ -208,7 +231,7 @@ axes[1].hist(scaled_residuals)
 axes[1].set_title("residuals at true value")
 axes[2].hist(huber_psi(scaled_residuals, huber_c))
 axes[2].set_title("Huber residuals at true value")
-axes[3].hist(tukey_bisquare_psi(scaled_residuals , 6.0))
+axes[3].hist(tukey_bisquare_psi(scaled_residuals , tukey_c))
 axes[3].set_title("Tukey residuals at true value")
 
 # +
@@ -217,15 +240,19 @@ ols_fit = binomial_fit(xx, theta_mean)
 
 theta_mean = pseudohuber_samples.sel(draw=slice(1001, None)).posterior["theta"].mean(dim=("chain", "draw")).values
 pseudo_huber_fit = binomial_fit(xx, theta_mean)
-# pseudo_huber_fit = binomial_fit(xx, last_valid_theta)
-# -
 
+theta_mean = tukey_samples.sel(draw=slice(1001, None)).posterior["theta"].mean(dim=("chain", "draw")).values
+tukey_fit = binomial_fit(xx, theta_mean)
+
+# +
 # Plot the generated data
 plt.figure(figsize=(8, 5))
 plt.scatter(xx_np, Y, label="Observed)", color="black", alpha=.5)
 plt.plot(xx_np, p_true, label="True function", linestyle="dashed", color="black")
 plt.plot(xx_np, ols_fit, label="nonrobust")
 plt.plot(xx_np, pseudo_huber_fit, label="Huber")
+plt.plot(xx_np, tukey_fit, label="Tukey")
+
 # plt.plot(xx_np, binomial_fit(xx_np, thetas[-1]))
 plt.xlabel("x")
 plt.ylabel("y")
@@ -240,10 +267,13 @@ fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 # Extract posterior samples for 'a' and 'b'
 theta_nonrobust = nonrobust_samples.posterior["theta"].values  # Convert to NumPy array if needed
 theta_pseudohuber = pseudohuber_samples.posterior["theta"].values
+theta_tukey = tukey_samples.posterior["theta"].values
+
 
 # Plot posterior distribution for 'a'
 az.plot_posterior(theta_nonrobust[..., 0], ax=axes[0], label="Non-Robust", color="blue")
-az.plot_posterior(theta_pseudohuber[..., 0], ax=axes[0], label="Pseudo-Huber", color="orange")
+az.plot_posterior(theta_pseudohuber[..., 0], ax=axes[0], label="Huber", color="orange")
+az.plot_posterior(theta_tukey[..., 0], ax=axes[0], label="Tukey", color="green")
 axes[0].axvline(true_a, color='red', linestyle="--", label="True a")
 axes[0].set_title("Posterior of a")
 axes[0].legend()
@@ -251,6 +281,7 @@ axes[0].legend()
 # Plot posterior distribution for 'b'
 az.plot_posterior(theta_nonrobust[..., 1], ax=axes[1], label="Non-Robust", color="blue")
 az.plot_posterior(theta_pseudohuber[..., 1], ax=axes[1], label="Pseudo-Huber", color="orange")
+az.plot_posterior(theta_tukey[..., 1], ax=axes[1], label="Tukey", color="green")
 axes[1].axvline(true_b, color='red', linestyle="--", label="True b")
 axes[1].set_title("Posterior of b")
 axes[1].legend()
@@ -269,25 +300,42 @@ a_nonrobust = theta_nonrobust[..., 0].flatten()
 b_nonrobust = theta_nonrobust[..., 1].flatten()
 a_pseudohuber = theta_pseudohuber[..., 0].flatten()
 b_pseudohuber = theta_pseudohuber[..., 1].flatten()
+a_tukey = theta_tukey[..., 0].flatten()
+b_tukey = theta_tukey[..., 1].flatten()
 
 # Create figure and axis
-fig, ax = plt.subplots(figsize=(8, 6))
+fig, axes = plt.subplots(1, 3, figsize=(12, 4), sharex=True, sharey=True)
 
 # Plot contour for non-robust sampler
+ax = axes[0]
 sns.kdeplot(x=a_nonrobust, y=b_nonrobust, levels=5, color="blue", linestyle="solid", label="Non-Robust", ax=ax)
-
-# Plot contour for pseudo-Huber sampler
-sns.kdeplot(x=a_pseudohuber, y=b_pseudohuber, levels=5, color="orange", linestyle="dashed", label="Pseudo-Huber", ax=ax)
-
-# Plot true value as an 'X' marker
+ax.set_title("Nonrobust posterior")
+ax.set_xlabel("rate")
+ax.set_ylabel("bias")
 ax.scatter(true_a, true_b, color='red', marker='x', s=100, label="True Value")
-
-# Labels and legend
-ax.set_xlabel("a")
-ax.set_ylabel("b")
-ax.set_title("Posterior Distribution of (a, b)")
 ax.legend()
 
+
+# Plot contour for pseudo-Huber sampler
+ax = axes[1]
+sns.kdeplot(x=a_pseudohuber, y=b_pseudohuber, levels=5, color="orange", linestyle="dashed", label="Pseudo-Huber", ax=ax)
+ax.set_title("Huber quasiposterior")
+ax.set_xlabel("rate")
+ax.set_ylabel("bias")
+ax.scatter(true_a, true_b, color='red', marker='x', s=100, label="True Value")
+ax.legend()
+
+# Plot contour for pseudo-Huber sampler
+ax = axes[2]
+sns.kdeplot(x=a_tukey, y=b_tukey, levels=5, color="green", linestyle="dashed", label="Tukey", ax=ax)
+ax.set_title("Tukey quasiposterior")
+ax.set_xlabel("rate")
+ax.set_ylabel("bias")
+ax.scatter(true_a, true_b, color='red', marker='x', s=100, label="True Value")
+ax.legend()
+
+
 # Show plot
-plt.show()
+fig.tight_layout()
+fig.show()
 
